@@ -7,6 +7,7 @@ from torchvision.datasets import CIFAR10
 from datasets.celeba import CelebA
 from datasets.ffhq import FFHQ
 from datasets.lsun import LSUN
+from datasets.lartpc import LARTPC
 from torch.utils.data import Subset
 import numpy as np
 
@@ -175,6 +176,31 @@ def get_dataset(args, config):
         )
         test_dataset = Subset(dataset, test_indices)
         dataset = Subset(dataset, train_indices)
+    elif config.data.dataset == "LARTPC":
+        dataset = LARTPC(
+            root="/sdf/home/y/youngsam/data/dune/diffusion_data/taritree/training_data",
+            transform=transforms.Compose(
+                [
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.ToTensor(),
+                ]
+            ),
+            split="train",
+            particle_type="both",
+        )
+
+        test_dataset = LARTPC(
+            root="/sdf/home/y/youngsam/data/dune/diffusion_data/taritree/training_data",
+            transform=transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                ]
+            ),
+            split="test",
+            particle_type="both",
+        )
+
     else:
         dataset, test_dataset = None, None
 
