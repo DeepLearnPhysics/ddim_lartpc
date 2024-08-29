@@ -8,6 +8,7 @@ from datasets.celeba import CelebA
 from datasets.ffhq import FFHQ
 from datasets.lsun import LSUN
 from datasets.lartpc import LARTPC
+from datasets.lartpc_sr import LARTPC_SR
 from torch.utils.data import Subset
 import numpy as np
 
@@ -200,6 +201,30 @@ def get_dataset(args, config):
             split="test",
             particle_type="both",
         )
+    elif config.data.dataset == "LARTPC_SR":
+        dataset = LARTPC_SR(
+            root="/sdf/home/y/youngsam/data/dune/diffusion_data/pilarnet/2d/dataset_{split}_64_512_{interpolation}",
+            transform=transforms.Compose(
+                [
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.ToTensor(),
+                ]
+            ),
+            split="train",
+            interpolation=config.data.interpolation,
+        )
+
+        test_dataset = LARTPC_SR(
+            root="/sdf/home/y/youngsam/data/dune/diffusion_data/pilarnet/2d/dataset_{split}_64_512_{interpolation}",
+            transform=transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                ]
+            ),
+            split="test",
+            interpolation=config.data.interpolation,
+        )
 
     else:
         dataset, test_dataset = None, None
@@ -219,7 +244,7 @@ def data_transform(config, X):
         X = X + torch.randn_like(X) * 0.01
 
     if config.data.rescaled:
-        X = 2 * X - 1.0
+        X = 2 * X / 255.0 - 1.0
     elif config.data.logit_transform:
         X = logit_transform(X)
 
@@ -236,6 +261,6 @@ def inverse_data_transform(config, X):
     if config.data.logit_transform:
         X = torch.sigmoid(X)
     elif config.data.rescaled:
-        X = (X + 1.0) / 2.0
+        X = (X + 1.0) / 2.0 * 255.0
 
-    return torch.clamp(X, 0.0, 1.0)
+    return torch.clamp(X, 0.0, 255.0)

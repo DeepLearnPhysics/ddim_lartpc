@@ -4,7 +4,7 @@ import time
 import glob
 
 import numpy as np
-import tqdm
+from tqdm.auto import tqdm
 import torch
 import torch.utils.data as data
 
@@ -14,8 +14,8 @@ from functions import get_optimizer
 from functions.losses import loss_registry
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path
-
 import torchvision.utils as tvu
+import torchvision.io as tvi
 
 
 def torch2hwcuint8(x, clip=False):
@@ -98,6 +98,7 @@ class Diffusion(object):
     def train(self):
         args, config = self.args, self.config
         tb_logger = self.config.tb_logger
+        wandb_logger = self.config.wandb_logger
         dataset, test_dataset = get_dataset(args, config)
         train_loader = data.DataLoader(
             dataset,
@@ -130,10 +131,15 @@ class Diffusion(object):
             if self.config.model.ema:
                 ema_helper.load_state_dict(states[4])
 
+        print("Iters / Epochs: ", len(train_loader))
         for epoch in range(start_epoch, self.config.training.n_epochs):
             data_start = time.time()
             data_time = 0
-            for i, (x, y) in enumerate(train_loader):
+            for i, input in enumerate(train_loader):
+
+                x = input['HR']     # target image
+                x_sr = input['SR']  # degraded image
+
                 n = x.size(0)
                 data_time += time.time() - data_start
                 model.train()
@@ -141,6 +147,9 @@ class Diffusion(object):
 
                 x = x.to(self.device)
                 x = data_transform(self.config, x)
+                x_sr = x_sr.to(self.device)
+                x_sr = data_transform(self.config, x_sr)
+
                 e = torch.randn_like(x)
                 b = self.betas
 
@@ -149,9 +158,11 @@ class Diffusion(object):
                     low=0, high=self.num_timesteps, size=(n // 2 + 1,)
                 ).to(self.device)
                 t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
-                loss = loss_registry[config.model.type](model, x, t, e, b)
+                loss = loss_registry[config.model.type](model, x, x_sr, t, e, b)
 
                 tb_logger.add_scalar("loss", loss, global_step=step)
+                if wandb_logger is not None:
+                    wandb_logger.log_metrics({"loss": loss.item()}, commit=True)
 
                 logging.info(
                     f"step: {step}, loss: {loss.item()}, data time: {data_time / (i+1)}"
@@ -187,12 +198,35 @@ class Diffusion(object):
                     )
                     torch.save(states, os.path.join(self.args.log_path, "ckpt.pth"))
 
+                if step % self.config.training.validation_freq == 0:
+                    img_dirs = self.sample_sequence(model, test_dataset, last_only=True)
+                    # write to tensorboard
+                    for img_dir in img_dirs:
+                        img_sr = tvi.read_image(img_dir[0]).to(torch.float32)
+                        img_hr = tvi.read_image(img_dir[1]).to(torch.float32)
+                        img_sr = torch.where((img_sr - img_sr.mean(dtype=torch.float32)) > 0., 255., img_sr).to(torch.uint8)
+                        img_hr = torch.where((img_hr - img_hr.mean(dtype=torch.float32)) > 0., 255., img_hr).to(torch.uint8)
+
+                        name_sr = 'eval/'+img_dir[0].split('/')[-1].split('.')[0]
+                        name_hr = 'eval/'+img_dir[1].split('/')[-1].split('.')[0]
+                        if wandb_logger is not None:
+                            imgs = []
+                            imgs.append(wandb_logger._wandb.Image(img_sr.numpy().transpose(1, 2, 0), caption=name_sr))
+                            imgs.append(wandb_logger._wandb.Image(img_hr.numpy().transpose(1, 2, 0), caption=name_hr))
+                            wandb_logger.log_metrics({'eval': imgs}, commit=True)
+                        tb_logger.add_image(name_sr, img_sr, global_step=step)
+                        tb_logger.add_image(name_hr, img_hr, global_step=step)
+
                 data_start = time.time()
 
-    def sample(self):
-        model = Model(self.config)
+    def sample(self, model=None, ema_helper=None):
+        if model is None:
+            model = Model(self.config)
+            skip_init = False
+        else:
+            skip_init = True
 
-        if not self.args.use_pretrained:
+        if not self.args.use_pretrained and not skip_init:
             if getattr(self.config.sampling, "ckpt_id", None) is None:
                 states = torch.load(
                     os.path.join(self.args.log_path, "ckpt.pth"),
@@ -216,7 +250,7 @@ class Diffusion(object):
                 ema_helper.ema(model)
             else:
                 ema_helper = None
-        else:
+        elif not skip_init:
             # This used the pretrained DDPM model, see https://github.com/pesser/pytorch_diffusion
             if self.config.data.dataset == "CIFAR10":
                 name = "cifar10"
@@ -230,14 +264,18 @@ class Diffusion(object):
             model.to(self.device)
             model = torch.nn.DataParallel(model)
 
+        _, test_dataset = get_dataset(self.args, self.config)
+
         model.eval()
 
         if self.args.fid:
+            raise NotImplementedError("FID not implemented")
             self.sample_fid(model)
         elif self.args.interpolation:
+            raise NotImplementedError("Interpolation not implemented")
             self.sample_interpolation(model)
         elif self.args.sequence:
-            self.sample_sequence(model)
+            self.sample_sequence(model, test_dataset)
         else:
             raise NotImplementedError("Sample procedeure not defined")
 
@@ -249,9 +287,7 @@ class Diffusion(object):
         n_rounds = (total_n_samples - img_id) // config.sampling.batch_size
 
         with torch.no_grad():
-            for _ in tqdm.tqdm(
-                range(n_rounds), desc="Generating image samples for FID evaluation."
-            ):
+            for _ in range(n_rounds):
                 n = config.sampling.batch_size
                 x = torch.randn(
                     n,
@@ -270,28 +306,61 @@ class Diffusion(object):
                     )
                     img_id += 1
 
-    def sample_sequence(self, model):
+    def sample_sequence(self, model, dset, last_only=False):
+        print('sampling sequence...')
         config = self.config
+        n_samples = 2
 
         x = torch.randn(
-            8,
+            n_samples,
             config.data.channels,
             config.data.image_size,
             config.data.image_size,
             device=self.device,
         )
+        dset = iter(dset)
+        x_hrs = []
+        x_srs = []
+        for i, input in enumerate(dset):
+            if i == n_samples:
+                break
+            x_hrs.append(input['HR'])
+            x_srs.append(input['SR'])
+        x_hr = torch.stack(x_hrs).to(self.device)
+        x_sr = torch.stack(x_srs).to(self.device)
+        del x_hrs, x_srs
+
+        assert x.shape == x_sr.shape, f"x.shape: {x.shape}, x_sr.shape: {x_sr.shape}"
 
         # NOTE: This means that we are producing each predicted x0, not x_{t-1} at timestep t.
         with torch.no_grad():
-            _, x = self.sample_image(x, model, last=False)
+            _, x = self.sample_image(x, x_sr, model, last=False)
 
         x = [inverse_data_transform(config, y) for y in x]
+        x_hr = inverse_data_transform(config, x_hr)
+        print('saving sequence...')
 
+        if not os.path.exists(self.args.image_folder):
+            os.makedirs(self.args.image_folder, exist_ok=True)
         for i in range(len(x)):
             for j in range(x[i].size(0)):
+                if last_only and i != len(x) - 1:
+                    continue
                 tvu.save_image(
-                    x[i][j], os.path.join(self.args.image_folder, f"{j}_{i}.png")
+                    x[i][j], os.path.join(self.args.image_folder, f"{j}_{i}_sr.png")
                 )
+
+                if i == len(x) - 1:
+                    tvu.save_image(
+                        x_hr[j], os.path.join(self.args.image_folder, f"{j}_hr.png")
+                    )
+
+        img_dirs = [
+            (os.path.join(self.args.image_folder, f"{j}_{len(x)-1}_sr.png"),
+            os.path.join(self.args.image_folder, f"{j}_hr.png"))
+            for j in range(x[i].size(0))
+        ]
+        return img_dirs
 
     def sample_interpolation(self, model):
         config = self.config
@@ -333,7 +402,8 @@ class Diffusion(object):
         for i in range(x.size(0)):
             tvu.save_image(x[i], os.path.join(self.args.image_folder, f"{i}.png"))
 
-    def sample_image(self, x, model, last=True):
+    def sample_image(self, x, x_lr, model, last=True):
+        print('sampling image...')
         try:
             skip = self.args.skip
         except Exception:
@@ -355,9 +425,10 @@ class Diffusion(object):
                 raise NotImplementedError
             from functions.denoising import generalized_steps
 
-            xs = generalized_steps(x, seq, model, self.betas, eta=self.args.eta)
+            xs = generalized_steps(x, x_lr, seq, model, self.betas, eta=self.args.eta)
             x = xs
         elif self.args.sample_type == "ddpm_noisy":
+            raise NotImplementedError
             if self.args.skip_type == "uniform":
                 skip = self.num_timesteps // self.args.timesteps
                 seq = range(0, self.num_timesteps, skip)

@@ -10,6 +10,7 @@ import numpy as np
 import torch.utils.tensorboard as tb
 
 from runners.diffusion import Diffusion
+from functions.wandb_logger import WandbLogger
 
 torch.set_printoptions(sci_mode=False)
 
@@ -86,6 +87,7 @@ def parse_args_and_config():
         help="eta used to control the variances of sigma",
     )
     parser.add_argument("--sequence", action="store_true")
+    parser.add_argument("--wandb", action="store_true")
 
     args = parser.parse_args()
     args.log_path = os.path.join(args.exp, "logs", args.doc)
@@ -96,6 +98,8 @@ def parse_args_and_config():
     new_config = dict2namespace(config)
 
     tb_path = os.path.join(args.exp, "tensorboard", args.doc)
+    wandb_path = os.path.join(args.exp, "wandb", args.doc)
+    new_config.wandb_path = wandb_path
 
     if not args.test and not args.sample:
         if not args.resume_training:
@@ -124,6 +128,12 @@ def parse_args_and_config():
                 yaml.dump(new_config, f, default_flow_style=False)
 
         new_config.tb_logger = tb.SummaryWriter(log_dir=tb_path)
+
+        if args.wandb:
+            new_config.wandb_logger = WandbLogger(new_config)
+        else:
+            new_config.wandb_logger = None
+
         # setup logger
         level = getattr(logging, args.verbose.upper(), None)
         if not isinstance(level, int):
@@ -155,31 +165,31 @@ def parse_args_and_config():
         logger.addHandler(handler1)
         logger.setLevel(level)
 
-        if args.sample:
-            os.makedirs(os.path.join(args.exp, "image_samples"), exist_ok=True)
-            args.image_folder = os.path.join(
-                args.exp, "image_samples", args.image_folder
-            )
-            if not os.path.exists(args.image_folder):
-                os.makedirs(args.image_folder)
-            else:
-                if not (args.fid or args.interpolation):
-                    overwrite = False
-                    if args.ni:
+    if not args.test:
+        os.makedirs(os.path.join(args.exp, "image_samples"), exist_ok=True)
+        args.image_folder = os.path.join(
+            args.exp, "image_samples", args.image_folder
+        )
+        if not os.path.exists(args.image_folder):
+            os.makedirs(args.image_folder)
+        else:
+            if not (args.fid or args.interpolation):
+                overwrite = False
+                if args.ni:
+                    overwrite = True
+                else:
+                    response = input(
+                        f"Image folder {args.image_folder} already exists. Overwrite? (Y/N)"
+                    )
+                    if response.upper() == "Y":
                         overwrite = True
-                    else:
-                        response = input(
-                            f"Image folder {args.image_folder} already exists. Overwrite? (Y/N)"
-                        )
-                        if response.upper() == "Y":
-                            overwrite = True
 
-                    if overwrite:
-                        shutil.rmtree(args.image_folder)
-                        os.makedirs(args.image_folder)
-                    else:
-                        print("Output image folder exists. Program halted.")
-                        sys.exit(0)
+                if overwrite:
+                    shutil.rmtree(args.image_folder)
+                    os.makedirs(args.image_folder)
+                else:
+                    print("Output image folder exists. Program halted.")
+                    sys.exit(0)
 
     # add device
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -217,6 +227,7 @@ def main():
     try:
         runner = Diffusion(args, config)
         if args.sample:
+            print('sampling...')
             runner.sample()
         elif args.test:
             runner.test()

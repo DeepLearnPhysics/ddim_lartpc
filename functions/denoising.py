@@ -1,27 +1,34 @@
 import torch
-
-
+import logging 
 def compute_alpha(beta, t):
     beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
     a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
     return a
 
 
-def generalized_steps(x, seq, model, b, **kwargs):
+def generalized_steps(x, x_lr, seq, model, b, **kwargs):
     with torch.no_grad():
         n = x.size(0)
         seq_next = [-1] + list(seq[:-1])
         x0_preds = []
         xs = [x]
-        for i, j in zip(reversed(seq), reversed(seq_next)):
+        print_interval = 15
+        curr_idx = 0
+        for i, j in list(zip(reversed(seq), reversed(seq_next))):
+            if curr_idx % print_interval == 0:
+                logging.info(f"Processing {curr_idx}/{len(seq)}")
+            curr_idx += 1
+
             t = (torch.ones(n) * i).to(x.device)
             next_t = (torch.ones(n) * j).to(x.device)
             at = compute_alpha(b, t.long())
             at_next = compute_alpha(b, next_t.long())
             xt = xs[-1].to('cuda')
-            et = model(xt, t)
+            model_inp = torch.cat([xt, x_lr], dim=1)
+            et = model(model_inp, t)
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
             x0_preds.append(x0_t.to('cpu'))
+
             c1 = (
                 kwargs.get("eta", 0) * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt()
             )
