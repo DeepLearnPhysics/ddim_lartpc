@@ -178,7 +178,7 @@ def get_dataset(args, config):
         dataset = Subset(dataset, train_indices)
     elif config.data.dataset == "LARTPC":
         dataset = LARTPC(
-            root="/sdf/home/y/youngsam/data/dune/diffusion_data/taritree/training_data",
+            root=os.path.join(args.exp, "datasets", "lartpc"),
             transform=transforms.Compose(
                 [
                     transforms.RandomHorizontalFlip(p=0.5),
@@ -191,7 +191,7 @@ def get_dataset(args, config):
         )
 
         test_dataset = LARTPC(
-            root="/sdf/home/y/youngsam/data/dune/diffusion_data/taritree/training_data",
+            root=os.path.join(args.exp, "datasets", "lartpc"),
             transform=transforms.Compose(
                 [
                     transforms.ToTensor(),
